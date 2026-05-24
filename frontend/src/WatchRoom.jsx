@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 
-const BACKEND_URL = 'https://party-watch-olive.vercel.app/';
+const BACKEND_URL = 'https://partywatch-q5d7.onrender.com';
 
 export default function WatchRoom({ roomId, username, onLeave }) {
   const [socket, setSocket] = useState(null);
