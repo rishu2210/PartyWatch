@@ -214,8 +214,8 @@ export default function App() {
 
       {/* Prominent Outside Typography Header Block */}
       <div style={styles.outsideHeroBlock}>
-        <div style={styles.outsideSubHeader}>⚡ Tune In Together</div>
-        <h1 style={styles.outsideMainHeader}>Welcome to WatchParty</h1>
+        <div style={styles.outsideSubHeader}>⚡Watch It Together</div>
+        <h1 style={styles.outsideMainHeader}>YouTube Synchronized Viewing Network</h1>
       </div>
 
       <div style={styles.centralCard}>
