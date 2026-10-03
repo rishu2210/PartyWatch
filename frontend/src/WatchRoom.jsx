@@ -1,7 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import io from 'socket.io-client';
 
-const BACKEND_URL = 'https://partywatch-q5d7.onrender.com';
+// Keep local development connected to the shared deployed room server by
+// default. Set VITE_BACKEND_URL=http://localhost:3001 to run the backend locally.
+const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || 'https://partywatch-q5d7.onrender.com';
+const MAX_VIDEO_BYTES = 10_000_000_000;
 
 export default function WatchRoom({ roomId, username, onLeave }) {
   const [socket, setSocket] = useState(null);
@@ -10,6 +13,9 @@ export default function WatchRoom({ roomId, username, onLeave }) {
   const [myId, setMyId] = useState('');
   
   const [videoId, setVideoId] = useState('');
+  const [mediaUrl, setMediaUrl] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [urlInput, setUrlInput] = useState('');
   
   const [chatInput, setChatInput] = useState('');
@@ -20,6 +26,8 @@ export default function WatchRoom({ roomId, username, onLeave }) {
 
   const isSyncing = useRef(false);
   const playerRef = useRef(null);
+  const youtubePlayerRef = useRef(null);
+  const uploadRequestRef = useRef(null);
 
   const roleRef = useRef('Participant');
   
@@ -31,6 +39,14 @@ export default function WatchRoom({ roomId, username, onLeave }) {
   const isModerator = myRole === 'Moderator';
   const isPrivileged = isHost || isModerator;
 
+  const seekPlayer = (time) => {
+    if (playerRef.current?.tagName === 'VIDEO') playerRef.current.currentTime = time;
+    else playerRef.current?.seekTo(time, true);
+  };
+  const pausePlayer = () => playerRef.current?.tagName === 'VIDEO' ? playerRef.current.pause() : playerRef.current?.pauseVideo();
+  const playPlayer = () => playerRef.current?.tagName === 'VIDEO' ? playerRef.current.play().catch(() => {}) : playerRef.current?.playVideo();
+  const getCurrentTime = () => playerRef.current?.tagName === 'VIDEO' ? playerRef.current.currentTime : playerRef.current?.getCurrentTime?.() || 0;
+
   // Global Page Body Background Enforcement
   useEffect(() => {
     const originalBg = document.body.style.backgroundColor;
@@ -41,23 +57,16 @@ export default function WatchRoom({ roomId, username, onLeave }) {
   }, []);
 
   useEffect(() => {
-    if (!window.YT) {
-      const tag = document.createElement('script');
-      tag.src = 'https://www.youtube.com/iframe_api';
-      const firstScriptTag = document.getElementsByTagName('script')[0];
-      firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
-    }
-
     const newSocket = io(BACKEND_URL, {
       transports: ['websocket'],
       upgrade: false
     });
-    setSocket(newSocket);
-
+    newSocket.on('connect', () => setSocket(newSocket));
     newSocket.emit('join_room', { roomId, username });
 
-    newSocket.on('sync_state', ({ videoId, isPlaying, currentTime, myRole, myId }) => {
+    newSocket.on('sync_state', ({ videoId, mediaUrl, isPlaying, currentTime, myRole, myId }) => {
       setVideoId(videoId);
+      setMediaUrl(mediaUrl ? `${BACKEND_URL}${mediaUrl}` : '');
       setMyRole(myRole);
       setMyId(myId);
 
@@ -65,12 +74,10 @@ export default function WatchRoom({ roomId, username, onLeave }) {
       hostIsPlayingRef.current = isPlaying;
 
       setTimeout(() => {
-        if (playerRef.current && typeof playerRef.current.seekTo === 'function' && currentTime > 0) {
+        if (playerRef.current && currentTime > 0) {
           isSyncing.current = true;
-          playerRef.current.seekTo(currentTime, true);
-          if (!isPlaying) {
-            playerRef.current.pauseVideo();
-          }
+          seekPlayer(currentTime);
+          if (!isPlaying) pausePlayer();
         }
       }, 1000);
     });
@@ -97,18 +104,18 @@ export default function WatchRoom({ roomId, username, onLeave }) {
     newSocket.on('play', () => {
       const privileged = roleRef.current === 'Host' || roleRef.current === 'Moderator';
       if (privileged) return; 
-      if (playerRef.current && typeof playerRef.current.playVideo === 'function') {
+      if (playerRef.current) {
         isSyncing.current = true;
-        playerRef.current.playVideo();
+        playPlayer();
       }
     });
 
     newSocket.on('pause', () => {
       const privileged = roleRef.current === 'Host' || roleRef.current === 'Moderator';
       if (privileged) return;
-      if (playerRef.current && typeof playerRef.current.pauseVideo === 'function') {
+      if (playerRef.current) {
         isSyncing.current = true;
-        playerRef.current.pauseVideo();
+        pausePlayer();
       }
     });
 
@@ -116,22 +123,23 @@ export default function WatchRoom({ roomId, username, onLeave }) {
       hostTimeRef.current = time;
       const privileged = roleRef.current === 'Host' || roleRef.current === 'Moderator';
       if (privileged) return;
-      if (playerRef.current && typeof playerRef.current.seekTo === 'function') {
+      if (playerRef.current) {
         isSyncing.current = true;
-        playerRef.current.seekTo(time, true);
+        seekPlayer(time);
       }
     });
 
     newSocket.on('force_seek', ({ time }) => {
       hostTimeRef.current = time;
-      if (playerRef.current && typeof playerRef.current.seekTo === 'function') {
+      if (playerRef.current) {
         isSyncing.current = true;
-        playerRef.current.seekTo(time, true);
+        seekPlayer(time);
       }
     });
 
-    newSocket.on('change_video', ({ videoId }) => {
-      setVideoId(videoId);
+    newSocket.on('change_video', ({ videoId, mediaUrl }) => {
+      setVideoId(videoId || '');
+      setMediaUrl(mediaUrl ? `${BACKEND_URL}${mediaUrl}` : '');
     });
 
     newSocket.on('receive_message', (msg) => {
@@ -151,15 +159,18 @@ export default function WatchRoom({ roomId, username, onLeave }) {
 
   // Player creation listener
   useEffect(() => {
-    if (!videoId) return;
+    if (!videoId || mediaUrl) return;
+    if (!window.YT) {
+      const tag = document.createElement('script');
+      tag.src = 'https://www.youtube.com/iframe_api';
+      document.head.appendChild(tag);
+    }
 
     const initPlayer = () => {
-      const targetContainer = document.getElementById('watchparty-player-frame');
-      if (targetContainer) {
-        targetContainer.innerHTML = '<div id="yt-player-placeholder" style="background-color: #000;"></div>';
-      }
+      const placeholder = document.getElementById('yt-player-placeholder');
+      if (!placeholder || youtubePlayerRef.current) return;
 
-      playerRef.current = new window.YT.Player('yt-player-placeholder', {
+      youtubePlayerRef.current = new window.YT.Player(placeholder, {
         videoId: videoId,
         width: '100%',
         height: '100%',
@@ -184,7 +195,7 @@ export default function WatchRoom({ roomId, username, onLeave }) {
             const privileged = roleRef.current === 'Host' || roleRef.current === 'Moderator';
             if (!privileged) return;
 
-            const currentTime = playerRef.current ? playerRef.current.getCurrentTime() : 0;
+            const currentTime = youtubePlayerRef.current ? youtubePlayerRef.current.getCurrentTime() : 0;
             if (e.data === window.YT.PlayerState.PLAYING) {
               socket.emit('play', { roomId, time: currentTime });
             }
@@ -194,12 +205,14 @@ export default function WatchRoom({ roomId, username, onLeave }) {
           }
         }
       });
+      playerRef.current = youtubePlayerRef.current;
     };
 
     if (window.YT && window.YT.Player) {
-      if (playerRef.current && typeof playerRef.current.loadVideoById === 'function') {
+      if (youtubePlayerRef.current) {
+        playerRef.current = youtubePlayerRef.current;
         isSyncing.current = true;
-        playerRef.current.loadVideoById(videoId);
+        youtubePlayerRef.current.loadVideoById(videoId);
       } else {
         initPlayer();
       }
@@ -212,14 +225,22 @@ export default function WatchRoom({ roomId, username, onLeave }) {
         window.onYouTubeIframeAPIReady = null;
       }
     };
-  }, [videoId, socket, roomId]);
+  }, [videoId, mediaUrl, socket, roomId]);
+
+  useEffect(() => {
+    if (!mediaUrl) return;
+    if (youtubePlayerRef.current?.pauseVideo) youtubePlayerRef.current.pauseVideo();
+    const video = document.getElementById('offline-video-player');
+    playerRef.current = video;
+    return () => { if (playerRef.current === video) playerRef.current = null; };
+  }, [mediaUrl]);
 
   // Global Sync intervals setup
   useEffect(() => {
     const heartbeat = setInterval(() => {
-      if (roleRef.current === 'Host' && playerRef.current && typeof playerRef.current.getCurrentTime === 'function' && socket) {
-        const currentTime = playerRef.current.getCurrentTime();
-        const isPlaying = playerRef.current.getPlayerState() === window.YT.PlayerState.PLAYING;
+      if (['Host', 'Moderator'].includes(roleRef.current) && playerRef.current && socket) {
+        const currentTime = getCurrentTime();
+        const isPlaying = playerRef.current.tagName === 'VIDEO' ? !playerRef.current.paused : playerRef.current.getPlayerState() === window.YT.PlayerState.PLAYING;
         socket.emit('time_heartbeat', { roomId, time: currentTime, isPlaying });
       }
     }, 2000);
@@ -228,24 +249,77 @@ export default function WatchRoom({ roomId, username, onLeave }) {
   }, [socket, roomId]);
 
   const handleSyncWithHost = () => {
-    if (!playerRef.current || typeof playerRef.current.seekTo !== 'function') return;
+    if (!playerRef.current) return;
     isSyncing.current = true;
-    playerRef.current.seekTo(hostTimeRef.current, true);
+    seekPlayer(hostTimeRef.current);
     if (hostIsPlayingRef.current) {
-      playerRef.current.playVideo();
+      playPlayer();
     } else {
-      playerRef.current.pauseVideo();
+      pausePlayer();
     }
   };
 
   const handleManualSeek = () => {
-    if (!isPrivileged || !playerRef.current || typeof playerRef.current.getCurrentTime !== 'function' || !socket) return;
-    socket.emit('force_seek', { roomId, time: playerRef.current.getCurrentTime() });
+    if (!isPrivileged || !playerRef.current || !socket) return;
+    socket.emit('force_seek', { roomId, time: getCurrentTime() });
   };
+
+  const handleOfflineUpload = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file || !socket) return;
+    if (!file.type.startsWith('video/')) return alert('Choose a video file.');
+    if (file.size > MAX_VIDEO_BYTES) {
+      const fileSizeGB = (file.size / 1_000_000_000).toFixed(2);
+      return alert(`This video is ${fileSizeGB} GB. The maximum is 10 GB, so it was rejected before upload.`);
+    }
+    setUploading(true);
+    setUploadProgress(0);
+    try {
+      await new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        uploadRequestRef.current = xhr;
+        xhr.open('POST', `${BACKEND_URL}/api/rooms/${encodeURIComponent(roomId)}/video`);
+        xhr.setRequestHeader('Content-Type', file.type);
+        xhr.setRequestHeader('X-Socket-Id', socket.id);
+        xhr.upload.onprogress = (event) => {
+          if (event.lengthComputable) setUploadProgress(Math.floor((event.loaded / event.total) * 100));
+        };
+        xhr.onerror = () => reject(new Error('Upload connection failed. Check the backend and your network, then try again.'));
+        xhr.onabort = () => reject(new DOMException('Upload cancelled.', 'AbortError'));
+        xhr.onload = () => {
+          const responseType = xhr.getResponseHeader('content-type') || '';
+          let result;
+          if (responseType.includes('application/json')) {
+            try { result = JSON.parse(xhr.responseText); }
+            catch { reject(new Error(`Upload endpoint returned invalid JSON (HTTP ${xhr.status}).`)); return; }
+          } else {
+            const detail = xhr.responseText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 180);
+            reject(new Error(`Upload endpoint returned a non-JSON response (HTTP ${xhr.status}). Deploy the updated backend and confirm BACKEND_URL is correct.${detail ? ` Server response: ${detail}` : ''}`));
+            return;
+          }
+          if (xhr.status < 200 || xhr.status >= 300) {
+            reject(new Error(result.error || `Upload failed (HTTP ${xhr.status}).`));
+            return;
+          }
+          setUploadProgress(100);
+          resolve();
+        };
+        xhr.send(file);
+      });
+    } catch (error) {
+      if (error.name !== 'AbortError') alert(error.message);
+    } finally {
+      uploadRequestRef.current = null;
+      setUploading(false);
+    }
+  };
+
+  const cancelOfflineUpload = () => uploadRequestRef.current?.abort();
 
   const handleUrlSubmit = (e) => {
     e.preventDefault();
-    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|\&v=)([^#\&\?]*).*/;
+    const regExp = /^.*(youtu.be\/|v\/|u\/\w\/|embed\/|watch\?v=|&v=)([^#&?]*).*/;
     const match = urlInput.match(regExp);
     const id = (match && match[2].length === 11) ? match[2] : urlInput;
     if (id && socket) {
@@ -293,35 +367,141 @@ export default function WatchRoom({ roomId, username, onLeave }) {
   };
 
   return (
-    <div style={styles.pageWrapper}>
+    <div className="watchparty-page" style={styles.pageWrapper}>
       {/* Dynamic CSS Override Block to target embedded iframe background properties explicitly */}
       <style>{`
         #watchparty-player-frame iframe {
           background-color: #000000 !important;
         }
+
+        @media (max-width: 820px) {
+          .watchparty-page {
+            min-height: 100vh !important;
+            min-height: 100dvh !important;
+            align-items: flex-start !important;
+            padding: 10px !important;
+          }
+          .watchparty-layout {
+            grid-template-columns: minmax(0, 1fr) !important;
+            width: 100% !important;
+            height: auto !important;
+            min-height: 0 !important;
+            max-width: 680px !important;
+            gap: 14px !important;
+            padding: 12px !important;
+            border-radius: 16px !important;
+          }
+          .watchparty-video-column {
+            height: auto !important;
+            min-width: 0 !important;
+          }
+          .watchparty-player-shell {
+            width: 100% !important;
+            height: auto !important;
+            aspect-ratio: 16 / 9;
+          }
+          #watchparty-player-frame,
+          #youtube-player-host,
+          #yt-player-placeholder,
+          #watchparty-player-frame iframe,
+          #offline-video-player {
+            width: 100% !important;
+            height: 100% !important;
+          }
+          .watchparty-panel {
+            height: auto !important;
+            min-width: 0 !important;
+            overflow: visible !important;
+            border-left: 0 !important;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            padding: 14px 0 0 !important;
+            gap: 14px !important;
+          }
+          .watchparty-url-form {
+            display: grid !important;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 8px !important;
+          }
+          .watchparty-chat-form {
+            display: grid !important;
+            grid-template-columns: minmax(0, 1fr) auto;
+            gap: 6px !important;
+          }
+          .watchparty-page input,
+          .watchparty-page button {
+            min-height: 44px;
+          }
+          .watchparty-page input {
+            min-width: 0;
+          }
+        }
+
+        @media (max-width: 480px) {
+          .watchparty-page { padding: 6px !important; }
+          .watchparty-layout { padding: 9px !important; gap: 10px !important; }
+          .watchparty-url-form { grid-template-columns: minmax(0, 1fr); }
+          .watchparty-url-form button,
+          .watchparty-chat-form button { width: 100%; }
+          .watchparty-chat-form { grid-template-columns: minmax(0, 1fr) 72px; }
+          .watchparty-panel h2 { font-size: 21px !important; }
+          .watchparty-upload-label {
+            white-space: normal !important;
+            line-height: 1.35;
+          }
+          .watchparty-upload-actions { grid-template-columns: minmax(0, 1fr) !important; }
+          .watchparty-participant-row {
+            align-items: flex-start !important;
+            flex-wrap: wrap;
+            gap: 8px;
+          }
+          .watchparty-participant-actions {
+            flex-wrap: wrap;
+          }
+        }
       `}</style>
       
-      <div style={styles.dashboardLayout}>
+      <div className="watchparty-layout" style={styles.dashboardLayout}>
         
-        <div style={styles.videoColumn}>
-          <div style={{ position: 'relative', width: '100%', height: '100%', background: '#000000', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 10px 30px rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div className="watchparty-video-column" style={styles.videoColumn}>
+          <div className="watchparty-player-shell" style={{ position: 'relative', width: '100%', height: '100%', background: '#000000', borderRadius: '12px', overflow: 'hidden', boxShadow: '0 10px 30px rgba(0,0,0,0.5)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
             <div id="watchparty-player-frame" style={{ width: '100%', height: '100%', backgroundColor: '#000000' }}>
-              <div id="yt-player-placeholder" style={{ backgroundColor: '#000000' }}></div>
+              <div id="youtube-player-host" style={{ display: mediaUrl ? 'none' : 'block', width: '100%', height: '100%' }}>
+                <div id="yt-player-placeholder" style={{ backgroundColor: '#000', width: '100%', height: '100%' }}></div>
+              </div>
+              {mediaUrl && (
+                <video id="offline-video-player" src={mediaUrl} controls playsInline preload="metadata" style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+                  onPlay={() => { if (isSyncing.current) { isSyncing.current = false; return; } if (isPrivileged && socket) socket.emit('play', { roomId, time: getCurrentTime() }); }}
+                  onPause={() => { if (isSyncing.current) { isSyncing.current = false; return; } if (isPrivileged && socket) socket.emit('pause', { roomId, time: getCurrentTime() }); }}
+                  onSeeked={() => { if (isSyncing.current) { isSyncing.current = false; return; } if (isPrivileged && socket) socket.emit('force_seek', { roomId, time: getCurrentTime() }); }} />
+              )}
             </div>
           </div>
         </div>
 
-        <div style={styles.panelColumn}>
+        <div className="watchparty-panel" style={styles.panelColumn}>
           <div>
             <h2 style={{ margin: '0 0 5px 0', fontSize: '24px', color: '#ff007f', textShadow: '0 0 10px rgba(255,0,127,0.3)' }}>WatchParty</h2>
             <p style={{ margin: 0, color: '#aaa', fontSize: '13px' }}>Room Code: <strong style={{ color: '#00f0ff' }}>{roomId}</strong> ({myRole})</p>
           </div>
 
           {isPrivileged ? (
-            <form onSubmit={handleUrlSubmit} style={{ display: 'flex', gap: '8px' }}>
-              <input type="text" placeholder="Paste YouTube Video URL or ID" value={urlInput} onChange={(e) => setUrlInput(e.target.value)} style={styles.inputField} />
-              <button type="submit" style={styles.neonBtn}>Change Video</button>
-            </form>
+            <div style={{ display: 'grid', gap: '8px' }}>
+              <form className="watchparty-url-form" onSubmit={handleUrlSubmit} style={{ display: 'flex', gap: '8px' }}>
+                <input type="text" placeholder="Paste YouTube Video URL or ID" value={urlInput} onChange={(e) => setUrlInput(e.target.value)} style={styles.inputField} />
+                <button type="submit" style={styles.neonBtn}>Change Video</button>
+              </form>
+              <div className="watchparty-upload-actions" style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) auto', gap: '8px' }}>
+                <label className="watchparty-upload-label" style={{ ...styles.neonBtn, display: 'block', textAlign: 'center', boxSizing: 'border-box' }}>
+                  {uploading ? (uploadProgress < 100 ? `Uploading video… ${uploadProgress}%` : 'Finishing upload…') : 'Upload downloaded video (max 10 GB)'}
+                  <input type="file" accept="video/*" onChange={handleOfflineUpload} disabled={uploading} style={{ display: 'none' }} />
+                </label>
+                {uploading && (
+                  <button type="button" onClick={cancelOfflineUpload} style={{ ...styles.actionBtn, borderColor: '#ff4a4a', color: '#ff4a4a', padding: '8px 12px', fontWeight: '700' }}>
+                    Cancel upload
+                  </button>
+                )}
+              </div>
+            </div>
           ) : (
             <button onClick={handleSyncWithHost} style={styles.syncBtn}>⚡ Sync with Host's Time</button>
           )}
@@ -329,12 +509,12 @@ export default function WatchRoom({ roomId, username, onLeave }) {
           <div style={{ ...styles.glassCard, maxHeight: '180px', overflowY: 'auto' }}>
             <h4 style={{ margin: '0 0 8px 0', color: '#00f0ff', fontSize: '13px' }}>Room Directory ({participants.length})</h4>
             {participants.map((p) => (
-              <div key={p.id} style={{ display: 'flex', flexDirection: 'column', padding: '6px 0', borderBottom: '1px solid rgba(255,255,255,0.04)', fontSize: '13px' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div key={p.id} style={{ display: 'flex', flexDirection: 'column', padding: '6px 0', borderBottom: '1px solid rgba(255,255,255,0.04)', fontSize: '13px' }}>
+                <div className="watchparty-participant-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span>{p.username} <small style={{ color: p.role === 'Host' ? '#ff007f' : '#00f0ff' }}>({p.role})</small></span>
                   
                   {isHost && p.id !== myId && (
-                    <div style={{ display: 'flex', gap: '4px' }}>
+                    <div className="watchparty-participant-actions" style={{ display: 'flex', gap: '4px' }}>
                       <button onClick={() => handleAssignRole(p.id, p.role)} style={{ ...styles.actionBtn, borderColor: '#00f0ff', color: '#00f0ff' }}>
                         {p.role === 'Moderator' ? 'Demote' : 'Mod'}
                       </button>
@@ -358,7 +538,7 @@ export default function WatchRoom({ roomId, username, onLeave }) {
                 </div>
               ))}
             </div>
-            <form onSubmit={sendChatMessage} style={{ display: 'flex', gap: '6px' }}>
+            <form className="watchparty-chat-form" onSubmit={sendChatMessage} style={{ display: 'flex', gap: '6px' }}>
               <input type="text" value={chatInput} onChange={(e) => setChatInput(e.target.value)} placeholder="Send a comment..." style={styles.inputField} />
               <button type="submit" style={{ ...styles.neonBtn, padding: '8px 14px' }}>Send</button>
             </form>

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import WatchRoom from './WatchRoom';
 import profileImg from './profile.jpg'; // Make sure your photo is saved as profile.jpg in your src/ folder
 
