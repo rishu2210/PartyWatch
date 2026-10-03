@@ -2,9 +2,85 @@ const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const { pipeline, Transform } = require('stream');
+const { promisify } = require('util');
+const pipelineAsync = promisify(pipeline);
 
 const app = express();
 app.use(cors());
+
+const uploadRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'watch-party-'));
+// The app accepts up to 10 GiB by default. Set MAX_VIDEO_BYTES on the server
+// to choose another limit; actual host disk/proxy limits still apply.
+const MAX_VIDEO_BYTES = Number(process.env.MAX_VIDEO_BYTES) || 10 * 1024 * 1024 * 1024;
+const safeUnlink = (filePath) => filePath && fs.promises.unlink(filePath).catch(() => {});
+
+app.post('/api/rooms/:roomId/video', async (req, res) => {
+  const room = rooms[req.params.roomId];
+  const requester = room?.participants.find((p) => p.id === req.get('x-socket-id'));
+  if (!room || !requester || !['Host', 'Moderator'].includes(requester.role)) {
+    return res.status(403).json({ error: 'Only the host or a moderator can upload a video.' });
+  }
+  const contentLength = Number(req.get('content-length'));
+  const contentType = req.get('content-type') || '';
+  if (!contentType.startsWith('video/') || !Number.isFinite(contentLength) || contentLength <= 0 || contentLength > MAX_VIDEO_BYTES) {
+    return res.status(400).json({ error: 'Choose a video file no larger than the configured upload limit.' });
+  }
+  const mediaId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const filePath = path.join(uploadRoot, mediaId);
+  let uploadedBytes = 0;
+  const sizeGuard = new Transform({
+    transform(chunk, encoding, callback) {
+      uploadedBytes += chunk.length;
+      if (uploadedBytes > MAX_VIDEO_BYTES) callback(new Error('Upload exceeds the configured size limit.'));
+      else callback(null, chunk);
+    }
+  });
+  try {
+    await pipelineAsync(req, sizeGuard, fs.createWriteStream(filePath, { flags: 'wx' }));
+    if (uploadedBytes !== contentLength) throw new Error('Upload size did not match Content-Length.');
+    if (rooms[req.params.roomId] !== room) {
+      await safeUnlink(filePath);
+      return res.status(410).json({ error: 'The room has ended.' });
+    }
+    if (room.mediaPath) await safeUnlink(room.mediaPath);
+    room.mediaPath = filePath;
+    room.mediaId = mediaId;
+    room.mediaType = contentType;
+    room.mediaUrl = `/api/rooms/${encodeURIComponent(room.roomId)}/video/${mediaId}`;
+    room.videoId = null;
+    room.currentTime = 0;
+    room.isPlaying = false;
+    io.to(room.roomId).emit('change_video', { mediaUrl: room.mediaUrl, mediaType: contentType });
+    res.json({ mediaUrl: room.mediaUrl, mediaType: contentType });
+  } catch (error) {
+    await safeUnlink(filePath);
+    if (!res.headersSent) res.status(400).json({ error: 'Video upload failed.' });
+  }
+});
+
+app.get('/api/rooms/:roomId/video/:mediaId', (req, res) => {
+  const room = rooms[req.params.roomId];
+  if (!room || room.mediaId !== req.params.mediaId || !room.mediaPath) return res.sendStatus(404);
+  res.setHeader('Content-Type', room.mediaType || 'video/mp4');
+  res.setHeader('Accept-Ranges', 'bytes');
+  const stat = fs.statSync(room.mediaPath);
+  const range = req.headers.range;
+  if (range) {
+    const [startText, endText] = range.replace(/bytes=/, '').split('-');
+    const start = Number(startText);
+    const end = endText ? Math.min(Number(endText), stat.size - 1) : stat.size - 1;
+    if (!Number.isInteger(start) || start < 0 || start > end) return res.sendStatus(416);
+    res.status(206).set({ 'Content-Range': `bytes ${start}-${end}/${stat.size}`, 'Content-Length': end - start + 1 });
+    fs.createReadStream(room.mediaPath, { start, end }).pipe(res);
+  } else {
+    res.setHeader('Content-Length', stat.size);
+    fs.createReadStream(room.mediaPath).pipe(res);
+  }
+});
 
 const server = http.createServer(app);
 const io = new Server(server, {
@@ -33,6 +109,10 @@ io.on('connection', (socket) => {
       rooms[roomId] = {
         roomId,
         videoId: DEFAULT_VIDEO_ID,
+        mediaUrl: null,
+        mediaType: null,
+        mediaPath: null,
+        mediaId: null,
         isPlaying: false,
         currentTime: 0,
         participants: [],
@@ -52,6 +132,8 @@ io.on('connection', (socket) => {
     // Sync state back to the user including saved history messages
     socket.emit('sync_state', {
       videoId: room.videoId,
+      mediaUrl: room.mediaUrl,
+      mediaType: room.mediaType,
       isPlaying: room.isPlaying,
       currentTime: room.currentTime,
       myRole: role,
@@ -124,6 +206,11 @@ io.on('connection', (socket) => {
     if (!room) return;
 
     room.videoId = videoId;
+    room.mediaUrl = null;
+    room.mediaType = null;
+    if (room.mediaPath) safeUnlink(room.mediaPath);
+    room.mediaPath = null;
+    room.mediaId = null;
     room.currentTime = 0;
     io.to(roomId).emit('change_video', { videoId });
   });
@@ -213,6 +300,7 @@ io.on('connection', (socket) => {
         if (disappearingUser.role === 'Host' && !activeHostExists) {
           console.log(`True room Host vanished. Killing room session in memory: ${roomId}`);
           io.to(roomId).emit('host_disconnected');
+          if (room.mediaPath) safeUnlink(room.mediaPath);
           delete rooms[roomId]; // Wipe room data
         } else {
           io.to(roomId).emit('user_left', { participants: room.participants });
