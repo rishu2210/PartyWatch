@@ -13,9 +13,8 @@ const app = express();
 app.use(cors());
 
 const uploadRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'watch-party-'));
-// The app accepts up to 10 GiB by default. Set MAX_VIDEO_BYTES on the server
-// to choose another limit; actual host disk/proxy limits still apply.
-const MAX_VIDEO_BYTES = Number(process.env.MAX_VIDEO_BYTES) || 10 * 1024 * 1024 * 1024;
+// Hard cap: 10 GB (decimal), enforced before and during upload.
+const MAX_VIDEO_BYTES = 10_000_000_000;
 const safeUnlink = (filePath) => filePath && fs.promises.unlink(filePath).catch(() => {});
 
 app.post('/api/rooms/:roomId/video', async (req, res) => {
@@ -27,7 +26,7 @@ app.post('/api/rooms/:roomId/video', async (req, res) => {
   const contentLength = Number(req.get('content-length'));
   const contentType = req.get('content-type') || '';
   if (!contentType.startsWith('video/') || !Number.isFinite(contentLength) || contentLength <= 0 || contentLength > MAX_VIDEO_BYTES) {
-    return res.status(400).json({ error: 'Choose a video file no larger than the configured upload limit.' });
+    return res.status(400).json({ error: 'Choose a video file no larger than 10 GB.' });
   }
   const mediaId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   const filePath = path.join(uploadRoot, mediaId);
@@ -35,7 +34,7 @@ app.post('/api/rooms/:roomId/video', async (req, res) => {
   const sizeGuard = new Transform({
     transform(chunk, encoding, callback) {
       uploadedBytes += chunk.length;
-      if (uploadedBytes > MAX_VIDEO_BYTES) callback(new Error('Upload exceeds the configured size limit.'));
+      if (uploadedBytes > MAX_VIDEO_BYTES) callback(new Error('Upload exceeds the 10 GB limit.'));
       else callback(null, chunk);
     }
   });
