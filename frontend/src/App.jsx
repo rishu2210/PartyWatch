@@ -215,7 +215,7 @@ export default function App() {
       {/* Prominent Outside Typography Header Block */}
       <div style={styles.outsideHeroBlock}>
         <div style={styles.outsideSubHeader}>⚡Watch It Together</div>
-        <h1 style={styles.outsideMainHeader}>YouTube Synchronized Viewing Network</h1>
+        <h1 style={styles.outsideMainHeader}>YouTube Synchronized Viewing Platform</h1>
       </div>
 
       <div style={styles.centralCard}>
@@ -245,7 +245,7 @@ export default function App() {
             <label style={styles.labelText}>Room Code</label>
             <input 
               type="text" 
-              placeholder="PASTE CODE" 
+              placeholder="ENTER CODE" 
               value={roomId} 
               onChange={(e) => setRoomId(e.target.value.toUpperCase())}
               style={{ ...styles.inputElement, textAlign: 'center', fontWeight: '700', color: '#00f0ff' }}

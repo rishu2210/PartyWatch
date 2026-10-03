@@ -480,7 +480,7 @@ export default function WatchRoom({ roomId, username, onLeave }) {
 
         <div className="watchparty-panel" style={styles.panelColumn}>
           <div>
-            <h2 style={{ margin: '0 0 5px 0', fontSize: '24px', color: '#ff007f', textShadow: '0 0 10px rgba(255,0,127,0.3)' }}>WatchParty</h2>
+            <h2 style={{ margin: '0 0 5px 0', fontSize: '24px', color: '#ff007f', textShadow: '0 0 10px rgba(255,0,127,0.3)' }}>Watch Together</h2>
             <p style={{ margin: 0, color: '#aaa', fontSize: '13px' }}>Room Code: <strong style={{ color: '#00f0ff' }}>{roomId}</strong> ({myRole})</p>
           </div>
 
